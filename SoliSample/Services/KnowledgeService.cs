@@ -1,17 +1,17 @@
-﻿using OpenAI.Chat;
-using System.ClientModel;
+﻿using System.Net.Http.Headers;
+using System.Text.Json;
 
 namespace SoliSample.Services;
 
 public class KnowledgeService
-{  
+{
     private readonly string[] docs;
-    private readonly ChatClient _client;  
+    private readonly HttpClient _httpClient;
+    private readonly string _modelName;
 
-    public KnowledgeService(IConfiguration _configuration)
+    public KnowledgeService(IConfiguration configuration)
     {
-        var path = Path.Combine(
-            AppContext.BaseDirectory,"docs");
+        var path = Path.Combine(AppContext.BaseDirectory, "docs");
 
         docs = Directory.Exists(path)
             ? Directory.GetFiles(path, "*.md")
@@ -19,14 +19,26 @@ public class KnowledgeService
                 .ToArray()
             : Array.Empty<string>();
 
-        var apiKey = _configuration["OPENAI_API_KEY"];
+        var apiKey = configuration["OPENAI_API_KEY"];
+
+        _modelName = configuration["OPENAI_MODEL"]
+                     ?? "openai/gpt-oss-120b:free";
 
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new Exception("OPENAI_API_KEY not found");
 
-        _client = new ChatClient(
-            model: "gpt-4.1-mini",
-            credential: new ApiKeyCredential(apiKey));
+        _httpClient = new HttpClient();
+
+        _httpClient.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", apiKey);
+
+        _httpClient.DefaultRequestHeaders.Add(
+            "HTTP-Referer",
+            "http://localhost");
+
+        _httpClient.DefaultRequestHeaders.Add(
+            "X-Title",
+            "MiniCompanyKnowledgeBot");
     }
 
     public async Task<string> Answer(string question)
@@ -35,44 +47,91 @@ public class KnowledgeService
             return "No documentation found.";
 
         var context = Retrieve(question);
-
-        var messages = new ChatMessage[]
+        
+        var payload = new
         {
-            ChatMessage.CreateSystemMessage("""You answer ONLY using provided company documentation.If information is missing say:"I couldn't find that in company docs."""),
+            model = _modelName,
+            max_tokens = 200,
+            temperature = 0.1,
+            messages = new object[]
+            {
+                new
+                {
+                    role = "system",                    
+                    content =
+                        """
+                        You are a company knowledge bot.
 
-            ChatMessage.CreateUserMessage($"""Documentation:{context}Question:{question}""")
+                        Answer ONLY from the provided documentation.
+
+                        If the answer is not found in the documentation,
+                        respond with:
+                        "I couldn't find that in company docs."
+                        """
+                },
+                new
+                {
+                    role = "user",
+                    content =
+                        $"""
+                        Documentation:
+
+                        {context}
+
+                        Question:
+                        {question}
+                        """
+                }
+            }
         };
 
         try
         {
-            var result =
-                await _client.CompleteChatAsync(messages);
+            var response = await _httpClient.PostAsJsonAsync(
+                "https://openrouter.ai/api/v1/chat/completions",
+                payload);
 
-            return result.Value.Content[0].Text;
+            var responseBody =
+                await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return $"OpenRouter Error: {response.StatusCode}\n{responseBody}";
+            }
+
+            using var document =
+                JsonDocument.Parse(responseBody);
+
+            return document
+                       .RootElement
+                       .GetProperty("choices")[0]
+                       .GetProperty("message")
+                       .GetProperty("content")
+                       .GetString()
+                   ?? "No response returned.";
         }
         catch (Exception ex)
         {
-            return ex.Message;
+            return $"Exception: {ex.Message}";
         }
     }
 
     private string Retrieve(string question)
     {
         var words = question
-            .ToLower()
+            .ToLowerInvariant()
             .Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
-        var best =
-            docs
-                .Select(d => new
-                {
-                    Text = d,
-                    Score = words.Count(w =>
-                        d.ToLower().Contains(w))
-                })
-                .OrderByDescending(x => x.Score)
-                .FirstOrDefault();
+        var bestMatch = docs
+            .Select(d => new
+            {
+                Text = d,
+                Score = words.Count(w =>
+                    d.Contains(w, StringComparison.OrdinalIgnoreCase))
+            })
+            .OrderByDescending(x => x.Score)
+            .FirstOrDefault();
 
-        return best?.Text ?? "";
+        return bestMatch?.Text ?? string.Empty;
     }
 }

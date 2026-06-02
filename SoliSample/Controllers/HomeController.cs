@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using SoliSample.Models;
 using SoliSample.Services;
+using System.Threading.Tasks;
 
 namespace SoliSample.Controllers
 {
@@ -9,9 +10,9 @@ namespace SoliSample.Controllers
     {
         [Route("ask")]
         [HttpPost]
-        public IActionResult Answer(AskRequest req, [FromServices] KnowledgeService service)
+        public async Task<IActionResult> Answer(AskRequest req, [FromServices] KnowledgeService service)
         {
-            var answer = service.Answer(req.Question);
+            var answer =await service.Answer(req.Question);
             return Ok(new { answer });
 
         }
